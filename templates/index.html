@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PDF RAG Chat</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>PDF RAG Chat</h1>
+
+      <form id="upload-form">
+        <input type="file" id="pdf-file" accept="application/pdf" required />
+        <button type="submit">Upload PDF</button>
+      </form>
+
+      <div id="upload-popup" class="popup hidden">PDF uploaded successfully!</div>
+
+      <div id="chat-box" class="chat-box"></div>
+
+      <form id="chat-form" class="chat-form">
+        <input type="text" id="question" placeholder="Ask a question about the PDF..." autocomplete="off" required />
+        <button type="submit">Send</button>
+      </form>
+    </div>
+
+    <script src="/static/main.js"></script>
+  </body>
+  </html>
+
+
