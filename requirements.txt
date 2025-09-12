@@ -2,14 +2,11 @@ flask
 langchain
 langchain-community
 langchain-openai
-langchain-pinecone
 sentence-transformers
-unstructured
-unstructured[pdf]
-pdfminer.six
 pinecone
 tiktoken
 pypdf
 python-dotenv
 gunicorn
+google-generativeai
 

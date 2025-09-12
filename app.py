@@ -6,10 +6,9 @@ from flask import Flask, jsonify, render_template, request, session
 
 from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
-from langchain_community.document_loaders import UnstructuredPDFLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone
-from langchain_pinecone import PineconeVectorStore
 from langchain.prompts import PromptTemplate
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from langchain_pinecone import PineconeRerank
@@ -22,6 +21,7 @@ import re
 import time
 import tiktoken
 from dotenv import load_dotenv
+import google.generativeai as genai
 
 
 # ----------------------------
@@ -45,6 +45,9 @@ OPENAI_API_BASE = os.getenv('OPENAI_API_BASE', 'https://openrouter.ai/api/v1')
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
 PINECONE_INDEX_NAME = os.getenv('PINECONE_INDEX_NAME', 'apirag')
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'latterworks/ollama-embeddings')
+LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'openrouter').lower()
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
 
 # Export for downstream SDKs that read from env
 if OPENAI_API_KEY:
@@ -53,18 +56,27 @@ os.environ['OPENAI_API_BASE'] = OPENAI_API_BASE
 if PINECONE_API_KEY:
     os.environ['PINECONE_API_KEY'] = PINECONE_API_KEY
 
+# Configure Gemini if selected
+if LLM_PROVIDER == 'gemini' and GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
 
 # ----------------------------
 # Embedding model wrapper (as provided)
 # ----------------------------
 class SentenceTransformerEmbeddingsWrapper(Embeddings):
     def __init__(self, model_name: str):
-        self.model = SentenceTransformer(model_name)
+        self.model_name = model_name
+        self.model = None
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        if self.model is None:
+            self.model = SentenceTransformer(self.model_name)
         return self.model.encode(texts).tolist()
 
     def embed_query(self, text: str) -> List[float]:
+        if self.model is None:
+            self.model = SentenceTransformer(self.model_name)
         return self.model.encode(text).tolist()
 
 embeddings_model = SentenceTransformerEmbeddingsWrapper(EMBEDDING_MODEL)
@@ -92,9 +104,7 @@ def ensure_index_exists():
         pc.create_index(name=INDEX_NAME, dimension=dim, metric="cosine")
 
 
-def get_vector_store_existing(namespace: str | None = None) -> PineconeVectorStore:
-    ensure_index_exists()
-    return PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings_model, namespace=namespace)
+## Removed VectorStore wrapper to reduce startup memory
 
 
 def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
@@ -103,7 +113,7 @@ def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
         chunk_size=1000,  # tokens
         chunk_overlap=150,
     )
-    loader = UnstructuredPDFLoader(pdf_path)
+    loader = PyPDFLoader(pdf_path)
     data = loader.load()
     print(f"DEBUG: Loaded {len(data)} pages from PDF")
     chunks = splitter.split_documents(data)
@@ -123,9 +133,6 @@ def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
         chunk.metadata["position"] = idx
 
     print(f"DEBUG: Adding {len(chunks)} chunks to Pinecone namespace: {namespace}")
-    vector_store = get_vector_store_existing(namespace=namespace)
-    print(f"DEBUG: Vector store namespace: {getattr(vector_store, '_namespace', 'None')}")
-    print(f"DEBUG: Vector store index name: {getattr(vector_store, 'index_name', 'None')}")
     
     try:
         # Try using Pinecone client directly instead of vector store
@@ -198,8 +205,11 @@ def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
 # ----------------------------
 # RAG pipeline pieces (as provided, completed with an LLM)
 # ----------------------------
-# Use a valid OpenRouter model id; can be overridden via OPENAI_MODEL env var
-llm = ChatOpenAI(model=os.environ.get("OPENAI_MODEL", "openai/gpt-oss-120b:free"))
+# LLM initialization: OpenRouter (default) or Gemini (via env)
+if LLM_PROVIDER == 'gemini':
+    llm = None
+else:
+    llm = ChatOpenAI(model=os.environ.get("OPENAI_MODEL", "openai/gpt-oss-120b:free"))
 
 query_prompt = PromptTemplate(
     input_variables=["question"],
@@ -276,6 +286,10 @@ def build_retriever(namespace: str | None):
     
     index = pc.Index(INDEX_NAME)
     base_retriever = DirectPineconeRetriever(index, embeddings_model, namespace)
+    
+    # If no LLM available (e.g., Gemini answering), skip MultiQuery and return base retriever
+    if llm is None:
+        return base_retriever
     
     # Test the custom retriever
     try:
@@ -496,8 +510,15 @@ def generate_answer_simple(namespace: str, question: str, chat_history: list[str
         "Answer:"
     )
 
-    llm_resp = llm.invoke(prompt_text)
-    answer_text = getattr(llm_resp, 'content', str(llm_resp))
+    if LLM_PROVIDER == 'gemini':
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        resp = model.generate_content(prompt_text)
+        answer_text = (getattr(resp, 'text', '') or '').strip()
+        if not answer_text:
+            answer_text = "I cannot find relevant information in the provided context"
+    else:
+        llm_resp = llm.invoke(prompt_text)
+        answer_text = getattr(llm_resp, 'content', str(llm_resp))
     answer = clean_output(answer_text)
 
     # Filter source snippets to only those cited
