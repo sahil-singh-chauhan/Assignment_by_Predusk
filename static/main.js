@@ -67,6 +67,17 @@ chatForm.addEventListener('submit', async (e) => {
   if (data.success) {
     appendMessage('assistant', data.answer);
     appendMetrics(data.metrics);
+    // Show token & cost if present
+    if (data.metrics && (data.metrics.tokens_in || data.metrics.tokens_out)) {
+      const tc = document.createElement('div');
+      tc.className = 'metrics';
+      const cin = data.metrics.tokens_in ?? 0;
+      const cout = data.metrics.tokens_out ?? 0;
+      const cost = (data.metrics.cost_usd_est !== undefined) ? ` · ~$${data.metrics.cost_usd_est}` : '';
+      tc.textContent = `tokens: in ${cin} / out ${cout}${cost}`;
+      chatBox.appendChild(tc);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
   } else {
     appendMessage('assistant', `Error: ${data.error || 'Something went wrong'}`);
   }

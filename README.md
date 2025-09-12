@@ -79,3 +79,17 @@ Open http://localhost:5000
 - 0 documents retrieved: re-upload PDF and ask without refreshing between steps
 - 404 from OpenRouter (ZDR): select a ZDR-capable model or disable ZDR
 - Slow upload: large files and embedding can take up to ~2 minutes
+
+---
+
+## Architecture & Settings (Compact)
+- Vector DB: Pinecone (cloud). Index: `PINECONE_INDEX_NAME` (default `apirag`). Dim: inferred from embeddings (384). Upsert: per-chunk ids `chunk_{i}_{namespace}`; namespace per session.
+- Embeddings: Sentence Transformers (`EMBEDDING_MODEL`, default `latterworks/ollama-embeddings`, 384-d). Chunking: 1,000 tokens, 150 overlap (~15%). Metadata per chunk: `source`, `title`, `section`, `position`.
+- Retriever: custom Pinecone retriever (top-k 5) + MultiQuery retriever. Reranker: PineconeRerank top_n 5.
+- LLM: OpenRouter-compatible `ChatOpenAI` (answer-only). Grounded answer with inline citations; backend appends only cited snippets. No-answer handled in prompt.
+- Frontend: upload area + chat box + answers panel; shows time; tokens and rough cost appended under the answer.
+- Hosting: Render (Gunicorn). Keep keys server-side. Example env in `env.example`.
+
+## Remarks
+- OpenRouter ZDR may block some models; choose a ZDR-supported model or disable ZDR.
+- Render free tier is resource-limited; service runs with 1 worker / 2 threads to reduce memory.

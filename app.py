@@ -160,7 +160,7 @@ def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
         import time
         ready = False
         target_count = upsert_response.get('upserted_count', len(vectors_to_upsert))
-        for _ in range(20):  # up to ~10s
+        for _ in range(6):  # up to ~3s
             try:
                 stats = index.describe_index_stats()
                 ns = stats.get('namespaces', {}).get(namespace, {})
@@ -252,7 +252,7 @@ def build_retriever(namespace: str | None):
             query_embedding = self.embeddings_model.embed_query(query)
             results = self.index.query(
                 vector=query_embedding,
-                top_k=5,
+                top_k=3,
                 namespace=self.namespace,
                 include_metadata=True
             )
@@ -287,7 +287,7 @@ def build_retriever(namespace: str | None):
     return MultiQueryRetriever.from_llm(base_retriever, llm, prompt=query_prompt)
 
 
-reranker = PineconeRerank(api_key=os.environ.get('PINECONE_API_KEY'), top_n=5)
+reranker = PineconeRerank(api_key=os.environ.get('PINECONE_API_KEY'), top_n=3)
 
 template = """Answer the question based only on the following context. Use inline citations [1], [2], etc. to reference specific sources from the context.
 
@@ -307,6 +307,7 @@ prompt = ChatPromptTemplate.from_template(template)
 
 
 def build_chains(namespace: str | None):
+    # Backward-compat placeholder (not used). Keeping to avoid large refactor.
     retriever = build_retriever(namespace)
 
     def clean_snippet_text(text: str) -> str:
@@ -416,22 +417,101 @@ def build_chains(namespace: str | None):
         
         return {"question": question, "context": context_text, "chat_history": chat_history, "source_snippets": source_snippets}
 
-    # Build a chain that returns both the model's answer and the source_snippets
-    chain_with_memory_reranked = (
-        RunnableLambda(retrieve_and_rerank)
-        | {
-            "answer": prompt | llm | StrOutputParser(),
-            "source_snippets": RunnableLambda(lambda x: x["source_snippets"]) 
-        }
+    # Not using continuous runnable chains anymore
+    return None, None
+
+
+def generate_answer_simple(namespace: str, question: str, chat_history: list[str] | list[dict]):
+    retriever = build_retriever(namespace)
+
+    # Retrieve and rerank
+    retrieved_docs = retriever.invoke(question)
+    print(f"DEBUG: Retrieved {len(retrieved_docs)} documents")
+    reranked_docs = reranker.rerank(retrieved_docs, question)
+    print(f"DEBUG: Reranked to {len(reranked_docs)} documents")
+    if not reranked_docs:
+        reranked_docs = retrieved_docs
+
+    # Build formatted context and source snippets (replicates previous logic)
+    formatted_context = []
+    source_snippets = []
+
+    def extract_doc_fields(d):
+        if hasattr(d, 'metadata'):
+            return d.metadata, d.page_content
+        if isinstance(d, dict) and 'document' in d:
+            nd = d['document']
+            if hasattr(nd, 'metadata'):
+                return nd.metadata, nd.page_content
+            return nd.get('metadata', {}), nd.get('page_content', nd.get('text', ''))
+        return d.get('metadata', {}), d.get('page_content', d.get('text', ''))
+
+    def clean_snippet_text(text: str) -> str:
+        patterns = [
+            r"(?im)^\s*Scan to Download.*$",
+            r"(?im)^\s*Written by .*$",
+            r"(?im)^\s*Listen .*Audiobook.*$",
+            r"(?im)^\s*About the book.*$",
+            r"(?im)^\s*Check more about .*$",
+            r"(?im)^\s*Key Point:.*$",
+            r"(?im)^\s*inspiration\s*$",
+        ]
+        for pat in patterns:
+            text = re.sub(pat, "", text)
+        lines = [re.sub(r"^[\-•\*\s]+", "", ln).strip() for ln in text.splitlines()]
+        lines = [ln for ln in lines if len(ln) > 2]
+        cleaned = "\n".join(lines)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned
+
+    for i, d in enumerate(reranked_docs, 1):
+        metadata, page_content = extract_doc_fields(d)
+        source_info = f"[{i}] "
+        if metadata.get('title'):
+            source_info += f"Source: {metadata['title']}"
+        if metadata.get('section') and metadata['section'] != 'unknown':
+            source_info += f", {metadata['section']}"
+        if metadata.get('position') is not None:
+            try:
+                source_info += f", Chunk {int(metadata['position']) + 1}"
+            except Exception:
+                pass
+        formatted_context.append(f"{source_info}\n{page_content}")
+        snippet = clean_snippet_text(page_content)
+        if snippet:
+            source_snippets.append(f"{source_info}\n{snippet}")
+
+    context_text = "\n\n".join(formatted_context)
+    print(f"DEBUG: Context length: {len(context_text)} characters")
+
+    # Compose prompt and call LLM
+    prompt_text = (
+        "Answer the question based only on the following context. Use inline citations [1], [2], etc. to reference specific sources from the context.\n\n"
+        f"Context:\n{context_text}\n\nQuestion: {question}\n\n"
+        "Instructions:\n"
+        "1. Answer the question using only information from the provided context\n"
+        "2. Use inline citations [1], [2], [3], etc. to reference specific parts of the context\n"
+        "3. If you cannot find relevant information in the context, say \"I cannot find relevant information in the provided context\"\n"
+        "4. Do NOT provide source snippets - they will be added automatically\n\n"
+        "Answer:"
     )
 
-    chain = (
-        {"context": RunnableLambda(lambda x: reranker.rerank(retriever.invoke(x['question']), x['question'])),
-         "question": RunnablePassthrough()}
-        | prompt | llm | StrOutputParser()
-    )
+    llm_resp = llm.invoke(prompt_text)
+    answer_text = getattr(llm_resp, 'content', str(llm_resp))
+    answer = clean_output(answer_text)
 
-    return chain_with_memory_reranked, chain
+    # Filter source snippets to only those cited
+    cited_numbers = set(int(n) for n in re.findall(r"\[(\d+)\]", answer))
+    filtered = []
+    for snippet in source_snippets:
+        m = re.match(r"\[(\d+)\]", snippet.strip())
+        if m and int(m.group(1)) in cited_numbers:
+            filtered.append(snippet)
+
+    if filtered:
+        answer += "\n\nSources:\n" + "\n\n".join(filtered)
+
+    return answer
 
 
 def clean_output(output_string: str) -> str:
@@ -518,33 +598,11 @@ def chat():
 
     print(f"DEBUG: Processing chat request for namespace: {namespace}")
     
-    chain_with_memory_reranked, _ = build_chains(namespace)
-
     chat_history = session.get("chat_history", [])
     try:
         start = time.perf_counter()
-        chain_result = chain_with_memory_reranked.invoke({
-            "question": question,
-            "chat_history": chat_history
-        })
+        answer = generate_answer_simple(namespace, question, chat_history)
         elapsed_ms = int((time.perf_counter() - start) * 1000)
-        # chain_result is now a dict with answer and source_snippets
-        if isinstance(chain_result, dict):
-            answer = clean_output(chain_result.get("answer", ""))
-            source_snippets = chain_result.get('source_snippets', [])
-
-            # Filter snippets to only those cited in the answer ([1], [2], etc.)
-            cited_numbers = set(int(n) for n in re.findall(r"\[(\d+)\]", answer))
-            filtered = []
-            for snippet in source_snippets:
-                m = re.match(r"\[(\d+)\]", snippet.strip())
-                if m and int(m.group(1)) in cited_numbers:
-                    filtered.append(snippet)
-
-            if filtered:
-                answer += "\n\nSources:\n" + "\n\n".join(filtered)
-        else:
-            answer = clean_output(chain_result)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
