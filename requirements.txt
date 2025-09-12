@@ -11,4 +11,5 @@ pinecone
 tiktoken
 pypdf
 python-dotenv
+gunicorn
 

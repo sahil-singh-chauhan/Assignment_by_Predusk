@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: pdf-rag-chat
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers=2 --threads=4
+    plan: free
+    envVars:
+      - key: OPENAI_API_BASE
+        value: https://openrouter.ai/api/v1
+      - key: PINECONE_INDEX_NAME
+        value: apirag
+    autoDeploy: true
