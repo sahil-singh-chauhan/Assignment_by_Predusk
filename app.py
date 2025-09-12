@@ -18,6 +18,10 @@ from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_openai import ChatOpenAI
+import re
+import time
+import tiktoken
+from dotenv import load_dotenv
 
 
 # ----------------------------
@@ -33,11 +37,21 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 # ----------------------------
-# Environment variables (as provided)
+# Environment variables loaded from .env (no hardcoded secrets)
 # ----------------------------
-os.environ.setdefault('OPENAI_API_KEY', "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")
-os.environ.setdefault('OPENAI_API_BASE', "https://openrouter.ai/api/v1")
-os.environ.setdefault('PINECONE_API_KEY', "pcsk_74vokm_KUuxFinVGUYHVxjtpyxwMixzQVV9whb7TCyUpUs1JjPkxupr95GShq4Fx8e6USz")
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+OPENAI_API_BASE = os.getenv('OPENAI_API_BASE', 'https://openrouter.ai/api/v1')
+PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
+PINECONE_INDEX_NAME = os.getenv('PINECONE_INDEX_NAME', 'apirag')
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'latterworks/ollama-embeddings')
+
+# Export for downstream SDKs that read from env
+if OPENAI_API_KEY:
+    os.environ['OPENAI_API_KEY'] = OPENAI_API_KEY
+os.environ['OPENAI_API_BASE'] = OPENAI_API_BASE
+if PINECONE_API_KEY:
+    os.environ['PINECONE_API_KEY'] = PINECONE_API_KEY
 
 
 # ----------------------------
@@ -53,30 +67,131 @@ class SentenceTransformerEmbeddingsWrapper(Embeddings):
     def embed_query(self, text: str) -> List[float]:
         return self.model.encode(text).tolist()
 
-
-model_name = "latterworks/ollama-embeddings"
-embeddings_model = SentenceTransformerEmbeddingsWrapper(model_name)
+embeddings_model = SentenceTransformerEmbeddingsWrapper(EMBEDDING_MODEL)
 
 
 # ----------------------------
 # Pinecone / Vector store helpers
 # ----------------------------
 pc = Pinecone(api_key=os.environ.get('PINECONE_API_KEY'))
-INDEX_NAME = "apirag"
+INDEX_NAME = PINECONE_INDEX_NAME
 
 
-def get_vector_store_existing() -> PineconeVectorStore:
-    return PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings_model)
+def get_embedding_dimension() -> int:
+    try:
+        vec = embeddings_model.embed_query("dimension probe")
+        return len(vec)
+    except Exception:
+        return 768
 
 
-def upsert_pdf_to_vectorstore(pdf_path: str) -> int:
-    splitter = RecursiveCharacterTextSplitter(chunk_size=8000, chunk_overlap=100)
+def ensure_index_exists():
+    dim = get_embedding_dimension()
+    existing = [idx["name"] for idx in pc.list_indexes()]  # type: ignore
+    if INDEX_NAME not in existing:
+        pc.create_index(name=INDEX_NAME, dimension=dim, metric="cosine")
+
+
+def get_vector_store_existing(namespace: str | None = None) -> PineconeVectorStore:
+    ensure_index_exists()
+    return PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings_model, namespace=namespace)
+
+
+def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
+    print(f"DEBUG: Loading PDF from {pdf_path}")
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        chunk_size=1000,  # tokens
+        chunk_overlap=150,
+    )
     loader = UnstructuredPDFLoader(pdf_path)
     data = loader.load()
+    print(f"DEBUG: Loaded {len(data)} pages from PDF")
     chunks = splitter.split_documents(data)
-    for chunk in chunks:
-        chunk.metadata["source_file"] = pdf_path
-    PineconeVectorStore.from_documents(chunks, index_name=INDEX_NAME, embedding=embeddings_model)
+    print(f"DEBUG: Split into {len(chunks)} chunks")
+
+    # enrich metadata for citation
+    title = os.path.basename(pdf_path)
+    for idx, chunk in enumerate(chunks):
+        chunk.metadata["source"] = pdf_path
+        chunk.metadata["title"] = title
+        # Unstructured may provide page number
+        if "page" in chunk.metadata:
+            section = f"page {chunk.metadata['page']}"
+        else:
+            section = "unknown"
+        chunk.metadata["section"] = section
+        chunk.metadata["position"] = idx
+
+    print(f"DEBUG: Adding {len(chunks)} chunks to Pinecone namespace: {namespace}")
+    vector_store = get_vector_store_existing(namespace=namespace)
+    print(f"DEBUG: Vector store namespace: {getattr(vector_store, '_namespace', 'None')}")
+    print(f"DEBUG: Vector store index name: {getattr(vector_store, 'index_name', 'None')}")
+    
+    try:
+        # Try using Pinecone client directly instead of vector store
+        index = pc.Index(INDEX_NAME)
+        
+        # Prepare vectors for direct upsert
+        vectors_to_upsert = []
+        for i, chunk in enumerate(chunks):
+            # Generate embedding
+            embedding = embeddings_model.embed_query(chunk.page_content)
+            
+            # Prepare vector data
+            vector_data = {
+                "id": f"chunk_{i}_{namespace}",
+                "values": embedding,
+                "metadata": {
+                    "text": chunk.page_content,
+                    "source": chunk.metadata.get("source", ""),
+                    "title": chunk.metadata.get("title", ""),
+                    "section": chunk.metadata.get("section", ""),
+                    "position": chunk.metadata.get("position", i)
+                }
+            }
+            vectors_to_upsert.append(vector_data)
+        
+        print(f"DEBUG: Upserting {len(vectors_to_upsert)} vectors to Pinecone")
+        
+        upsert_response = index.upsert(vectors=vectors_to_upsert, namespace=namespace)
+        print(f"DEBUG: Successfully upserted {upsert_response['upserted_count']} vectors")
+
+        # Poll Pinecone until the namespace reports vectors (readiness)
+        import time
+        ready = False
+        target_count = upsert_response.get('upserted_count', len(vectors_to_upsert))
+        for _ in range(20):  # up to ~10s
+            try:
+                stats = index.describe_index_stats()
+                ns = stats.get('namespaces', {}).get(namespace, {})
+                count = ns.get('vector_count', 0)
+                if count >= max(1, min(target_count, 1)):
+                    ready = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        print(f"DEBUG: Namespace ready: {ready}")
+        
+    except Exception as e:
+        print(f"DEBUG: Failed to add chunks to Pinecone: {e}")
+        import traceback
+        traceback.print_exc()
+        raise e
+    
+    # Verify the chunks were actually added
+    try:
+        index = pc.Index(INDEX_NAME)
+        query_embedding = embeddings_model.embed_query("test")
+        results = index.query(
+            vector=query_embedding,
+            top_k=1,
+            namespace=namespace,
+            include_metadata=True
+        )
+        print(f"DEBUG: Verification successful - {len(results['matches'])} matches found")
+    except Exception as e:
+        print(f"DEBUG: Verification failed: {e}")
     return len(chunks)
 
 
@@ -99,39 +214,215 @@ query_prompt = PromptTemplate(
 )
 
 
-def build_retriever():
-    vector_store = get_vector_store_existing()
-    base_retriever = vector_store.as_retriever()
+def build_retriever(namespace: str | None):
+    print(f"DEBUG: Building retriever for namespace: {namespace}")
+    
+    # Test direct Pinecone query
+    try:
+        index = pc.Index(INDEX_NAME)
+        query_embedding = embeddings_model.embed_query("test")
+        results = index.query(
+            vector=query_embedding,
+            top_k=5,
+            namespace=namespace,
+            include_metadata=True
+        )
+        print(f"DEBUG: Found {len(results['matches'])} documents in namespace")
+    except Exception as e:
+        print(f"DEBUG: Query failed: {e}")
+    
+    # Create a custom retriever that uses direct Pinecone queries
+    from langchain_core.retrievers import BaseRetriever
+    from langchain_core.documents import Document
+    from typing import List
+    
+    class DirectPineconeRetriever(BaseRetriever):
+        index: object
+        embeddings_model: object
+        namespace: str
+        
+        def __init__(self, index, embeddings_model, namespace):
+            super().__init__(
+                index=index,
+                embeddings_model=embeddings_model,
+                namespace=namespace
+            )
+        
+        def _get_relevant_documents(self, query: str) -> List[Document]:
+            query_embedding = self.embeddings_model.embed_query(query)
+            results = self.index.query(
+                vector=query_embedding,
+                top_k=5,
+                namespace=self.namespace,
+                include_metadata=True
+            )
+            
+            # Convert Pinecone results to Document objects
+            docs = []
+            for match in results['matches']:
+                # Handle different metadata structures
+                metadata = match.get('metadata', {})
+                text_content = metadata.get('text', '')
+                if not text_content:
+                    # Fallback to other possible text fields
+                    text_content = metadata.get('page_content', '')
+                
+                doc = Document(
+                    page_content=text_content,
+                    metadata=metadata
+                )
+                docs.append(doc)
+            return docs
+    
+    index = pc.Index(INDEX_NAME)
+    base_retriever = DirectPineconeRetriever(index, embeddings_model, namespace)
+    
+    # Test the custom retriever
+    try:
+        test_docs = base_retriever._get_relevant_documents("test")
+        print(f"DEBUG: Retriever ready with {len(test_docs)} test documents")
+    except Exception as e:
+        print(f"DEBUG: Retriever test failed: {e}")
+    
     return MultiQueryRetriever.from_llm(base_retriever, llm, prompt=query_prompt)
 
 
 reranker = PineconeRerank(api_key=os.environ.get('PINECONE_API_KEY'), top_n=5)
 
-template = (
-    """Answer the question based only on the following context and also give source snippets from the pdf below the answer:
+template = """Answer the question based only on the following context. Use inline citations [1], [2], etc. to reference specific sources from the context.
+
+Context:
 {context}
 
 Question: {question}
-"""
-)
+
+Instructions:
+1. Answer the question using only information from the provided context
+2. Use inline citations [1], [2], [3], etc. to reference specific parts of the context
+3. If you cannot find relevant information in the context, say "I cannot find relevant information in the provided context"
+4. Do NOT provide source snippets - they will be added automatically
+
+Answer:"""
 prompt = ChatPromptTemplate.from_template(template)
 
 
-def build_chains():
-    retriever = build_retriever()
+def build_chains(namespace: str | None):
+    retriever = build_retriever(namespace)
+
+    def clean_snippet_text(text: str) -> str:
+        # Remove common boilerplate and marketing lines
+        patterns = [
+            r"(?im)^\s*Scan to Download.*$",
+            r"(?im)^\s*Written by .*$",
+            r"(?im)^\s*Listen .*Audiobook.*$",
+            r"(?im)^\s*About the book.*$",
+            r"(?im)^\s*Check more about .*$",
+            r"(?im)^\s*Key Point:.*$",
+            r"(?im)^\s*inspiration\s*$",
+        ]
+        for pat in patterns:
+            text = re.sub(pat, "", text)
+        # Strip bullets and excessive whitespace
+        lines = [re.sub(r"^[\-•\*\s]+", "", ln).strip() for ln in text.splitlines()]
+        # Drop empty lines and very short headings
+        lines = [ln for ln in lines if len(ln) > 2]
+        cleaned = "\n".join(lines)
+        # Collapse multiple newlines
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned
 
     def retrieve_and_rerank(input_dict):
         question = input_dict["question"]
         chat_history = input_dict.get("chat_history", [])
-        retrieved_docs = retriever.get_relevant_documents(question)
+        retrieved_docs = retriever.invoke(question)
+        print(f"DEBUG: Retrieved {len(retrieved_docs)} documents")
         reranked_docs = reranker.rerank(retrieved_docs, question)
-        return {"question": question, "context": reranked_docs, "chat_history": chat_history}
+        print(f"DEBUG: Reranked to {len(reranked_docs)} documents")
+        # Fallback: if reranker yields nothing, use retrieved docs directly
+        if not reranked_docs:
+            reranked_docs = retrieved_docs
+        
+        # Format context with source information for citations
+        formatted_context = []
+        for i, doc in enumerate(reranked_docs, 1):
+            source_info = f"[{i}] "
+            
+            # Handle both Document objects and dictionaries
+            if hasattr(doc, 'metadata'):
+                metadata = doc.metadata
+                page_content = doc.page_content
+            else:
+                # Handle dictionary format from reranker
+                if 'document' in doc:
+                    # Reranker returns {id, index, score, document}
+                    nested_doc = doc['document']
+                    if hasattr(nested_doc, 'metadata'):
+                        metadata = nested_doc.metadata
+                        page_content = nested_doc.page_content
+                    else:
+                        metadata = nested_doc.get('metadata', {})
+                        page_content = nested_doc.get('page_content', nested_doc.get('text', ''))
+                else:
+                    # Direct dictionary format
+                    metadata = doc.get('metadata', {})
+                    page_content = doc.get('page_content', doc.get('text', ''))
+            
+            if metadata.get('title'):
+                source_info += f"Source: {metadata['title']}"
+            if metadata.get('section') and metadata['section'] != 'unknown':
+                source_info += f", {metadata['section']}"
+            if metadata.get('position') is not None:
+                source_info += f", Chunk {metadata['position'] + 1}"
+            
+            formatted_doc = f"{source_info}\n{page_content}"
+            formatted_context.append(formatted_doc)
+        
+        context_text = "\n\n".join(formatted_context)
+        print(f"DEBUG: Context length: {len(context_text)} characters")
+        print(f"DEBUG: Context preview: {context_text[:200]}...")
+        
+        # Store source snippets for later appending
+        source_snippets = []
+        for i, doc in enumerate(reranked_docs, 1):
+            if hasattr(doc, 'metadata'):
+                metadata = doc.metadata
+                page_content = doc.page_content
+            else:
+                if 'document' in doc:
+                    nested_doc = doc['document']
+                    if hasattr(nested_doc, 'metadata'):
+                        metadata = nested_doc.metadata
+                        page_content = nested_doc.page_content
+                    else:
+                        metadata = nested_doc.get('metadata', {})
+                        page_content = nested_doc.get('page_content', nested_doc.get('text', ''))
+                else:
+                    metadata = doc.get('metadata', {})
+                    page_content = doc.get('page_content', doc.get('text', ''))
+            
+            source_info = f"[{i}] "
+            if metadata.get('title'):
+                source_info += f"Source: {metadata['title']}"
+            if metadata.get('section') and metadata['section'] != 'unknown':
+                source_info += f", {metadata['section']}"
+            if metadata.get('position') is not None:
+                source_info += f", Chunk {metadata['position'] + 1}"
+            
+            # Clean and truncate snippet text
+            snippet_raw = page_content
+            snippet = clean_snippet_text(snippet_raw)
+            if snippet:
+                source_snippets.append(f"{source_info}\n{snippet}")
+        
+        return {"question": question, "context": context_text, "chat_history": chat_history, "source_snippets": source_snippets}
 
+    # Build a chain that returns both the model's answer and the source_snippets
     chain_with_memory_reranked = (
         RunnableLambda(retrieve_and_rerank)
-        | prompt
-        | llm
-        | StrOutputParser()
+        | {
+            "answer": prompt | llm | StrOutputParser(),
+            "source_snippets": RunnableLambda(lambda x: x["source_snippets"]) 
+        }
     )
 
     chain = (
@@ -159,9 +450,25 @@ def clean_output(output_string: str) -> str:
 # ----------------------------
 @app.route("/")
 def index():
-    if "session_id" not in session:
-        session["session_id"] = str(uuid.uuid4())
-        session["chat_history"] = []
+    # On refresh/new visit: clear only the current session's namespace
+    old_namespace = session.get("namespace")
+    if old_namespace:
+        try:
+            index = pc.Index(INDEX_NAME)
+            index.delete(delete_all=True, namespace=old_namespace)
+            print(f"DEBUG: Cleaned up old namespace: {old_namespace}")
+        except Exception:
+            pass
+    
+    # Clear session and upload directory completely
+    session.clear()
+    import shutil
+    if os.path.exists(UPLOAD_DIR):
+        shutil.rmtree(UPLOAD_DIR)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    
+    session["session_id"] = str(uuid.uuid4())
+    session["chat_history"] = []
     return render_template("index.html")
 
 
@@ -175,12 +482,24 @@ def upload_pdf():
     if not file.filename.lower().endswith(".pdf"):
         return jsonify({"success": False, "error": "Only PDF files are supported"}), 400
 
+    # Clear chat history for new PDF
+    session["chat_history"] = []
+
     save_path = os.path.join(UPLOAD_DIR, file.filename)
     file.save(save_path)
 
     try:
-        num_chunks = upsert_pdf_to_vectorstore(save_path)
+        # Use session-scoped namespace to avoid cross-file contamination
+        if "session_id" not in session:
+            session["session_id"] = str(uuid.uuid4())
+        # Use a simpler namespace format
+        namespace = f"pdf_{session['session_id'][:8]}"
+        session["namespace"] = namespace
+        print(f"DEBUG: Uploading PDF to namespace: {namespace}")
+        num_chunks = upsert_pdf_to_vectorstore(save_path, namespace)
+        print(f"DEBUG: Created {num_chunks} chunks from PDF")
     except Exception as e:
+        print(f"DEBUG: Upload error: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
     return jsonify({"success": True, "message": "PDF uploaded and processed", "chunks": num_chunks})
@@ -193,15 +512,39 @@ def chat():
     if not question:
         return jsonify({"success": False, "error": "Question is required"}), 400
 
-    chain_with_memory_reranked, _ = build_chains()
+    namespace = session.get("namespace")
+    if not namespace:
+        return jsonify({"success": False, "error": "No PDF uploaded in this session. Please upload a PDF first."}), 400
+
+    print(f"DEBUG: Processing chat request for namespace: {namespace}")
+    
+    chain_with_memory_reranked, _ = build_chains(namespace)
 
     chat_history = session.get("chat_history", [])
     try:
-        result = chain_with_memory_reranked.invoke({
+        start = time.perf_counter()
+        chain_result = chain_with_memory_reranked.invoke({
             "question": question,
             "chat_history": chat_history
         })
-        answer = clean_output(result)
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        # chain_result is now a dict with answer and source_snippets
+        if isinstance(chain_result, dict):
+            answer = clean_output(chain_result.get("answer", ""))
+            source_snippets = chain_result.get('source_snippets', [])
+
+            # Filter snippets to only those cited in the answer ([1], [2], etc.)
+            cited_numbers = set(int(n) for n in re.findall(r"\[(\d+)\]", answer))
+            filtered = []
+            for snippet in source_snippets:
+                m = re.match(r"\[(\d+)\]", snippet.strip())
+                if m and int(m.group(1)) in cited_numbers:
+                    filtered.append(snippet)
+
+            if filtered:
+                answer += "\n\nSources:\n" + "\n\n".join(filtered)
+        else:
+            answer = clean_output(chain_result)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -210,7 +553,47 @@ def chat():
     chat_history.append({"role": "assistant", "content": answer})
     session["chat_history"] = chat_history
 
-    return jsonify({"success": True, "answer": answer})
+    # rough token and cost estimates
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        encoding = None
+
+    tokens_in = 0
+    if encoding is not None:
+        ctx = "\n".join([m.get("content", "") for m in chat_history[-6:]]) + "\n" + question
+        tokens_in = len(encoding.encode(ctx))
+    else:
+        tokens_in = max(1, len(question) // 4)
+
+    tokens_out = len(answer) // 4
+
+    # very rough pricing (USD per 1K tokens)
+    INPUT_PER_K = float(os.environ.get("MODEL_PRICE_IN", "0.0003"))
+    OUTPUT_PER_K = float(os.environ.get("MODEL_PRICE_OUT", "0.0015"))
+    cost_est = (tokens_in / 1000.0) * INPUT_PER_K + (tokens_out / 1000.0) * OUTPUT_PER_K
+
+    return jsonify({
+        "success": True,
+        "answer": answer,
+        "metrics": {
+            "elapsed_ms": elapsed_ms,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_usd_est": round(cost_est, 6)
+        }
+    })
+
+
+@app.route("/cleanup", methods=["POST"])
+def cleanup_all():
+    """Clean up all namespaces - for debugging"""
+    try:
+        index = pc.Index(INDEX_NAME)
+        index.delete(delete_all=True)
+        return jsonify({"success": True, "message": "All namespaces cleaned up"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 if __name__ == "__main__":

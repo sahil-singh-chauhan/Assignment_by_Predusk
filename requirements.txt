@@ -10,4 +10,6 @@ pdfminer.six
 pinecone
 tiktoken
 pypdf
+python-dotenv
+gunicorn
 
