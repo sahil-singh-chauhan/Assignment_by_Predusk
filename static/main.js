@@ -1,7 +1,7 @@
 const uploadForm = document.getElementById('upload-form');
 const pdfInput = document.getElementById('pdf-file');
+const uploadingPopup = document.getElementById('uploading-popup');
 const popup = document.getElementById('upload-popup');
-const uploading = document.getElementById('uploading-popup');
 const chatForm = document.getElementById('chat-form');
 const questionInput = document.getElementById('question');
 const chatBox = document.getElementById('chat-box');
@@ -33,19 +33,17 @@ uploadForm.addEventListener('submit', async (e) => {
   if (!pdfInput.files.length) return;
   const formData = new FormData();
   formData.append('file', pdfInput.files[0]);
-  // show uploading popup
-  uploading.classList.remove('hidden');
+  // show uploading popup immediately
+  uploadingPopup.classList.remove('hidden');
   const res = await fetch('/upload', { method: 'POST', body: formData });
   const data = await res.json();
-  // hide uploading popup
-  uploading.classList.add('hidden');
+  // hide uploading popup either way
+  uploadingPopup.classList.add('hidden');
   if (data.success) {
     showPopup();
     // Clear chat history when new PDF is uploaded
     chatBox.innerHTML = '';
   } else {
-    // hide uploading popup in case of error
-    uploading.classList.add('hidden');
     if (data.error && data.error.includes('refresh the page')) {
       alert('Please refresh the page to upload a new PDF');
     } else {

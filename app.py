@@ -199,7 +199,7 @@ def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
 # RAG pipeline pieces (as provided, completed with an LLM)
 # ----------------------------
 # Use a valid OpenRouter model id; can be overridden via OPENAI_MODEL env var
-llm = ChatOpenAI(model=os.environ.get("OPENAI_MODEL", "openai/gpt-4o-mini"))
+llm = ChatOpenAI(model=os.environ.get("OPENAI_MODEL", "openai/gpt-oss-120b:free"))
 
 query_prompt = PromptTemplate(
     input_variables=["question"],
@@ -297,8 +297,8 @@ Context:
 Question: {question}
 
 Instructions:
-1. Answer the question using only information from the provided context
-2. Use inline citations [1], [2], [3], etc. to reference specific parts of the context
+1. Answer the question using only information from the provided context and in under 50 words.
+2. Use inline citations [1], [2], [3], etc. to reference specific parts of the context that also under 80 words.
 3. If you cannot find relevant information in the context, say "I cannot find relevant information in the provided context"
 4. Do NOT provide source snippets - they will be added automatically
 

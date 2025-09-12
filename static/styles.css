@@ -6,8 +6,7 @@ form { margin-bottom: 16px; display: flex; gap: 8px; }
 .popup { position: fixed; top: 20px; right: 20px; background: #16a34a; color: white; padding: 12px 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
 .hidden { display: none; }
 
-/* uploading popup variant */
-#uploading-popup { background: #0ea5e9; }
+#uploading-popup { background: #f59e0b; }
 
 .chat-box { height: 440px; overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fafafa; margin-bottom: 8px; }
 .msg { padding: 8px 10px; border-radius: 8px; margin: 6px 0; white-space: pre-wrap; }
