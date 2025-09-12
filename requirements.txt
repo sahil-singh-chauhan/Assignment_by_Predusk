@@ -9,4 +9,5 @@ pypdf
 python-dotenv
 gunicorn
 google-generativeai
+requests
 

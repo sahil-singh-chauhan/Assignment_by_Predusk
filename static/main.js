@@ -2,6 +2,7 @@ const uploadForm = document.getElementById('upload-form');
 const pdfInput = document.getElementById('pdf-file');
 const uploadingPopup = document.getElementById('uploading-popup');
 const popup = document.getElementById('upload-popup');
+const thinkingPopup = document.getElementById('thinking-popup');
 const chatForm = document.getElementById('chat-form');
 const questionInput = document.getElementById('question');
 const chatBox = document.getElementById('chat-box');
@@ -58,28 +59,42 @@ chatForm.addEventListener('submit', async (e) => {
   if (!question) return;
   appendMessage('user', question);
   questionInput.value = '';
-  const res = await fetch('/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question })
-  });
-  const data = await res.json();
-  if (data.success) {
-    appendMessage('assistant', data.answer);
-    appendMetrics(data.metrics);
-    // Show token & cost if present
-    if (data.metrics && (data.metrics.tokens_in || data.metrics.tokens_out)) {
-      const tc = document.createElement('div');
-      tc.className = 'metrics';
-      const cin = data.metrics.tokens_in ?? 0;
-      const cout = data.metrics.tokens_out ?? 0;
-      const cost = (data.metrics.cost_usd_est !== undefined) ? ` · ~$${data.metrics.cost_usd_est}` : '';
-      tc.textContent = `tokens: in ${cin} / out ${cout}${cost}`;
-      chatBox.appendChild(tc);
-      chatBox.scrollTop = chatBox.scrollHeight;
+  
+  // Show thinking popup
+  thinkingPopup.classList.remove('hidden');
+  
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question })
+    });
+    const data = await res.json();
+    
+    // Hide thinking popup
+    thinkingPopup.classList.add('hidden');
+    
+    if (data.success) {
+      appendMessage('assistant', data.answer);
+      appendMetrics(data.metrics);
+      // Show token & cost if present
+      if (data.metrics && (data.metrics.tokens_in || data.metrics.tokens_out)) {
+        const tc = document.createElement('div');
+        tc.className = 'metrics';
+        const cin = data.metrics.tokens_in ?? 0;
+        const cout = data.metrics.tokens_out ?? 0;
+        const cost = (data.metrics.cost_usd_est !== undefined) ? ` · ~$${data.metrics.cost_usd_est}` : '';
+        tc.textContent = `tokens: in ${cin} / out ${cout}${cost}`;
+        chatBox.appendChild(tc);
+        chatBox.scrollTop = chatBox.scrollHeight;
+      }
+    } else {
+      appendMessage('assistant', `Error: ${data.error || 'Something went wrong'}`);
     }
-  } else {
-    appendMessage('assistant', `Error: ${data.error || 'Something went wrong'}`);
+  } catch (error) {
+    // Hide thinking popup on error too
+    thinkingPopup.classList.add('hidden');
+    appendMessage('assistant', `Error: Network error - ${error.message}`);
   }
 });
 

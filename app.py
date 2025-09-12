@@ -1,5 +1,6 @@
 import os
 import uuid
+import requests
 from typing import List
 
 from flask import Flask, jsonify, render_template, request, session
@@ -11,7 +12,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone
 from langchain.prompts import PromptTemplate
 from langchain.retrievers.multi_query import MultiQueryRetriever
-from langchain_pinecone import PineconeRerank
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -80,6 +80,74 @@ class SentenceTransformerEmbeddingsWrapper(Embeddings):
         return self.model.encode(text).tolist()
 
 embeddings_model = SentenceTransformerEmbeddingsWrapper(EMBEDDING_MODEL)
+
+
+# ----------------------------
+# Jina Reranker
+# ----------------------------
+def jina_rerank(question: str, docs: list, top_n: int = 3):
+    """Rerank documents using Jina API"""
+    api_key = os.getenv("JINA_API_KEY")
+    model = os.getenv("JINA_RERANK_MODEL", "jina-reranker-v1-base-en")
+    if not api_key or not docs:
+        print(f"DEBUG: Jina rerank skipped - API key: {bool(api_key)}, docs: {len(docs)}")
+        return docs  # fallback: no rerank
+
+    # Extract plain text from docs or dicts (supports your current formats)
+    def get_text(d):
+        if hasattr(d, "page_content"):
+            return d.page_content
+        if isinstance(d, dict) and "document" in d:
+            nd = d["document"]
+            if hasattr(nd, "page_content"):
+                return nd.page_content
+            return nd.get("page_content", nd.get("text", ""))
+        return d.get("page_content", d.get("text", ""))
+
+    # Prepare documents for Jina API
+    documents_for_api = [{"text": get_text(d)} for d in docs]
+    
+    payload = {
+        "model": model,
+        "query": question,
+        "documents": documents_for_api,
+        "top_n": int(os.getenv("JINA_TOP_N", str(top_n)))
+    }
+    
+    try:
+        print(f"DEBUG: Calling Jina rerank API with {len(documents_for_api)} documents")
+        resp = requests.post(
+            "https://api.jina.ai/v1/rerank",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=20,
+        )
+        
+        if resp.status_code != 200:
+            print(f"DEBUG: Jina API error {resp.status_code}: {resp.text}")
+            return docs  # fallback on API error
+            
+        data = resp.json()
+        print(f"DEBUG: Jina API response: {data}")
+        
+        # data["results"] contains ranked docs with indices
+        results = data.get("results", [])
+        if not results:
+            print("DEBUG: No results from Jina API")
+            return docs
+            
+        # Map back to original docs by indices
+        out = []
+        for r in results:
+            idx = r.get("index")
+            if idx is not None and 0 <= idx < len(docs):
+                out.append(docs[idx])
+        
+        print(f"DEBUG: Jina rerank successful, returning {len(out)} documents")
+        return out or docs
+    except Exception as e:
+        print(f"DEBUG: Jina rerank failed: {e}")
+        return docs  # fallback on any API issue
 
 
 # ----------------------------
@@ -301,7 +369,6 @@ def build_retriever(namespace: str | None):
     return MultiQueryRetriever.from_llm(base_retriever, llm, prompt=query_prompt)
 
 
-reranker = PineconeRerank(api_key=os.environ.get('PINECONE_API_KEY'), top_n=3)
 
 template = """Answer the question based only on the following context. Use inline citations [1], [2], etc. to reference specific sources from the context.
 
@@ -351,11 +418,9 @@ def build_chains(namespace: str | None):
         chat_history = input_dict.get("chat_history", [])
         retrieved_docs = retriever.invoke(question)
         print(f"DEBUG: Retrieved {len(retrieved_docs)} documents")
-        reranked_docs = reranker.rerank(retrieved_docs, question)
+        # Use Jina reranker
+        reranked_docs = jina_rerank(question, retrieved_docs, top_n=3)
         print(f"DEBUG: Reranked to {len(reranked_docs)} documents")
-        # Fallback: if reranker yields nothing, use retrieved docs directly
-        if not reranked_docs:
-            reranked_docs = retrieved_docs
         
         # Format context with source information for citations
         formatted_context = []
@@ -441,10 +506,9 @@ def generate_answer_simple(namespace: str, question: str, chat_history: list[str
     # Retrieve and rerank
     retrieved_docs = retriever.invoke(question)
     print(f"DEBUG: Retrieved {len(retrieved_docs)} documents")
-    reranked_docs = reranker.rerank(retrieved_docs, question)
+    # Use Jina reranker
+    reranked_docs = jina_rerank(question, retrieved_docs, top_n=3)
     print(f"DEBUG: Reranked to {len(reranked_docs)} documents")
-    if not reranked_docs:
-        reranked_docs = retrieved_docs
 
     # Build formatted context and source snippets (replicates previous logic)
     formatted_context = []
