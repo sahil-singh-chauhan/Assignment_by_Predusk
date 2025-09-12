@@ -71,12 +71,16 @@ class SentenceTransformerEmbeddingsWrapper(Embeddings):
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         if self.model is None:
-            self.model = SentenceTransformer(self.model_name)
+            print("DEBUG: Loading embedding model...")
+            self.model = SentenceTransformer(self.model_name, device="cpu")
+            print("DEBUG: Embedding model loaded")
         return self.model.encode(texts).tolist()
 
     def embed_query(self, text: str) -> List[float]:
         if self.model is None:
-            self.model = SentenceTransformer(self.model_name)
+            print("DEBUG: Loading embedding model...")
+            self.model = SentenceTransformer(self.model_name, device="cpu")
+            print("DEBUG: Embedding model loaded")
         return self.model.encode(text).tolist()
 
 embeddings_model = SentenceTransformerEmbeddingsWrapper(EMBEDDING_MODEL)
@@ -178,8 +182,8 @@ def ensure_index_exists():
 def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
     print(f"DEBUG: Loading PDF from {pdf_path}")
     splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        chunk_size=1000,  # tokens
-        chunk_overlap=150,
+        chunk_size=500,  # tokens - reduced for memory
+        chunk_overlap=75,  # reduced overlap
     )
     loader = PyPDFLoader(pdf_path)
     data = loader.load()
@@ -330,7 +334,7 @@ def build_retriever(namespace: str | None):
             query_embedding = self.embeddings_model.embed_query(query)
             results = self.index.query(
                 vector=query_embedding,
-                top_k=3,
+                top_k=2,  # reduced for memory
                 namespace=self.namespace,
                 include_metadata=True
             )
@@ -419,7 +423,7 @@ def build_chains(namespace: str | None):
         retrieved_docs = retriever.invoke(question)
         print(f"DEBUG: Retrieved {len(retrieved_docs)} documents")
         # Use Jina reranker
-        reranked_docs = jina_rerank(question, retrieved_docs, top_n=3)
+        reranked_docs = jina_rerank(question, retrieved_docs, top_n=2)
         print(f"DEBUG: Reranked to {len(reranked_docs)} documents")
         
         # Format context with source information for citations
@@ -507,7 +511,7 @@ def generate_answer_simple(namespace: str, question: str, chat_history: list[str
     retrieved_docs = retriever.invoke(question)
     print(f"DEBUG: Retrieved {len(retrieved_docs)} documents")
     # Use Jina reranker
-    reranked_docs = jina_rerank(question, retrieved_docs, top_n=3)
+    reranked_docs = jina_rerank(question, retrieved_docs, top_n=2)
     print(f"DEBUG: Reranked to {len(reranked_docs)} documents")
 
     # Build formatted context and source snippets (replicates previous logic)
