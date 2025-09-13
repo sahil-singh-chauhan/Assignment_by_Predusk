@@ -7,16 +7,16 @@ Upload a PDF and ask grounded questions about it. The app uses a RAG pipeline: e
 
 ## 1) Vector Database (hosted)
 - Provider: Pinecone (cloud-hosted)
-- Index/collection: `PINECONE_INDEX_NAME` (env, default `apirag`)
-- Dimensionality: auto-detected from the embedding model at startup (current model = 384 dims)
+- Index/collection: `PINECONE_INDEX_NAME` (env, default `apirag-1024`)
+- Dimensionality: auto-detected from the embedding model at startup (current model = 1024 dims)
 - Upsert strategy:
   - PDF is split into chunks; each chunk is embedded and upserted with a unique id `chunk_{i}_{namespace}`
   - Per-session namespace (e.g., `pdf_xxxxxxxx`) isolates data per upload
   - Metadata stored per vector: `source` (path), `title` (filename), `section` (page if available), `position` (chunk index)
 
 ## 2) Embeddings & Chunking
-- Embedding model: Sentence Transformers (`EMBEDDING_MODEL` env; default `latterworks/ollama-embeddings` → 384-d)
-  - You can switch to any provider (OpenAI/Cohere/Jina/Voyage/Nomic) by changing env and wrapper
+- Embedding model: Jina AI Embeddings v3 (`EMBEDDING_MODEL` env; default `jina-embeddings-v3` → 1024-d)
+  - Uses Jina API for embeddings with configurable dimensions
 - Chunking strategy: token-based splitter `from_tiktoken_encoder`
   - Size: 1,000 tokens
   - Overlap: 150 tokens (~15%)
@@ -60,8 +60,10 @@ OPENAI_API_KEY=your_key
 OPENAI_API_BASE=https://openrouter.ai/api/v1  # or https://api.openai.com/v1
 OPENAI_MODEL=openai/gpt-4o-mini
 PINECONE_API_KEY=your_pinecone_key
-PINECONE_INDEX_NAME=apirag
-EMBEDDING_MODEL=latterworks/ollama-embeddings
+PINECONE_INDEX_NAME=apirag-1024
+JINA_API_KEY=your_jina_key
+EMBEDDING_MODEL=jina-embeddings-v3
+JINA_EMBEDDING_DIMENSIONS=1024
 FLASK_SECRET_KEY=change-me
 ```
 3) Run
@@ -83,8 +85,8 @@ Open http://localhost:5000
 ---
 
 ## Architecture & Settings (Compact)
-- Vector DB: Pinecone (cloud). Index: `PINECONE_INDEX_NAME` (default `apirag`). Dim: inferred from embeddings (384). Upsert: per-chunk ids `chunk_{i}_{namespace}`; namespace per session.
-- Embeddings: Sentence Transformers (`EMBEDDING_MODEL`, default `latterworks/ollama-embeddings`, 384-d). Chunking: 1,000 tokens, 150 overlap (~15%). Metadata per chunk: `source`, `title`, `section`, `position`.
+- Vector DB: Pinecone (cloud). Index: `PINECONE_INDEX_NAME` (default `apirag-1024`). Dim: inferred from embeddings (1024). Upsert: per-chunk ids `chunk_{i}_{namespace}`; namespace per session.
+- Embeddings: Jina AI Embeddings v3 (`EMBEDDING_MODEL`, default `jina-embeddings-v3`, 1024-d). Chunking: 1,000 tokens, 150 overlap (~15%). Metadata per chunk: `source`, `title`, `section`, `position`.
 - Retriever: custom Pinecone retriever (top-k 5) + MultiQuery retriever. Reranker: PineconeRerank top_n 5.
 - LLM: OpenRouter-compatible `ChatOpenAI` (answer-only). Grounded answer with inline citations; backend appends only cited snippets. No-answer handled in prompt.
 - Frontend: upload area + chat box + answers panel; shows time; tokens and rough cost appended under the answer.

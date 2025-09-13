@@ -9,5 +9,5 @@ services:
       - key: OPENAI_API_BASE
         value: https://openrouter.ai/api/v1
       - key: PINECONE_INDEX_NAME
-        value: apirag
+        value: apirag-1024
     autoDeploy: true

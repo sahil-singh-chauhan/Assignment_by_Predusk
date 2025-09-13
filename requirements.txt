@@ -2,7 +2,6 @@ flask
 langchain
 langchain-community
 langchain-openai
-sentence-transformers
 pinecone
 tiktoken
 pypdf

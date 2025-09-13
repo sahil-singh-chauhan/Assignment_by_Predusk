@@ -6,7 +6,7 @@ from typing import List
 from flask import Flask, jsonify, render_template, request, session
 
 from langchain_core.embeddings import Embeddings
-from sentence_transformers import SentenceTransformer
+# Removed sentence_transformers import - using Jina API instead
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone
@@ -43,8 +43,10 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_API_BASE = os.getenv('OPENAI_API_BASE', 'https://openrouter.ai/api/v1')
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
-PINECONE_INDEX_NAME = os.getenv('PINECONE_INDEX_NAME', 'apirag')
-EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'latterworks/ollama-embeddings')
+PINECONE_INDEX_NAME = os.getenv('PINECONE_INDEX_NAME', 'apirag-1024')
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'jina-embeddings-v3')
+JINA_API_KEY = os.getenv('JINA_API_KEY')
+JINA_EMBEDDING_DIMENSIONS = int(os.getenv('JINA_EMBEDDING_DIMENSIONS', '1024'))
 LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'openrouter').lower()
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
@@ -62,28 +64,70 @@ if LLM_PROVIDER == 'gemini' and GEMINI_API_KEY:
 
 
 # ----------------------------
-# Embedding model wrapper (as provided)
+# Jina Embeddings v3 wrapper using API
 # ----------------------------
-class SentenceTransformerEmbeddingsWrapper(Embeddings):
-    def __init__(self, model_name: str):
+class JinaEmbeddingsWrapper(Embeddings):
+    def __init__(self, model_name: str, api_key: str, dimensions: int = 1024):
         self.model_name = model_name
-        self.model = None
+        self.api_key = api_key
+        self.dimensions = dimensions
+        if not api_key:
+            raise ValueError("JINA_API_KEY is required for Jina embeddings")
+
+    def _call_jina_api(self, texts: List[str]) -> List[List[float]]:
+        """Call Jina embeddings API v3"""
+        payload = {
+            "model": self.model_name,
+            "task": "retrieval.passage",
+            "dimensions": self.dimensions,
+            "late_chunking": False,
+            "embedding_type": "float",
+            "input": texts
+        }
+        
+        try:
+            print(f"DEBUG: Calling Jina embeddings API for {len(texts)} texts")
+            resp = requests.post(
+                "https://api.jina.ai/v1/embeddings",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
+                json=payload,
+                timeout=30
+            )
+            
+            if resp.status_code != 200:
+                print(f"DEBUG: Jina API error {resp.status_code}: {resp.text}")
+                raise Exception(f"Jina API error: {resp.status_code} - {resp.text}")
+            
+            data = resp.json()
+            embeddings = [item["embedding"] for item in data["data"]]
+            print(f"DEBUG: Successfully got {len(embeddings)} embeddings from Jina API")
+            return embeddings
+            
+        except Exception as e:
+            print(f"DEBUG: Jina embeddings API failed: {e}")
+            raise e
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        if self.model is None:
-            print("DEBUG: Loading embedding model...")
-            self.model = SentenceTransformer(self.model_name, device="cpu")
-            print("DEBUG: Embedding model loaded")
-        return self.model.encode(texts).tolist()
+        # Process in batches to avoid API limits
+        batch_size = 50  # Reasonable batch size for Jina API
+        all_embeddings = []
+        
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            print(f"DEBUG: Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size} with {len(batch)} texts")
+            batch_embeddings = self._call_jina_api(batch)
+            all_embeddings.extend(batch_embeddings)
+        
+        return all_embeddings
 
     def embed_query(self, text: str) -> List[float]:
-        if self.model is None:
-            print("DEBUG: Loading embedding model...")
-            self.model = SentenceTransformer(self.model_name, device="cpu")
-            print("DEBUG: Embedding model loaded")
-        return self.model.encode(text).tolist()
+        embeddings = self._call_jina_api([text])
+        return embeddings[0]
 
-embeddings_model = SentenceTransformerEmbeddingsWrapper(EMBEDDING_MODEL)
+embeddings_model = JinaEmbeddingsWrapper(EMBEDDING_MODEL, JINA_API_KEY, JINA_EMBEDDING_DIMENSIONS)
 
 
 # ----------------------------
@@ -163,10 +207,10 @@ INDEX_NAME = PINECONE_INDEX_NAME
 
 def get_embedding_dimension() -> int:
     try:
-        vec = embeddings_model.embed_query("dimension probe")
-        return len(vec)
+        # For Jina embeddings v3, we know the dimension from configuration
+        return JINA_EMBEDDING_DIMENSIONS
     except Exception:
-        return 768
+        return 1024
 
 
 def ensure_index_exists():
@@ -182,8 +226,8 @@ def ensure_index_exists():
 def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
     print(f"DEBUG: Loading PDF from {pdf_path}")
     splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        chunk_size=500,  # tokens - reduced for memory
-        chunk_overlap=75,  # reduced overlap
+        chunk_size=1000,  # tokens - Jina v3 handles larger chunks better
+        chunk_overlap=150,  # 15% overlap
     )
     loader = PyPDFLoader(pdf_path)
     data = loader.load()
@@ -210,12 +254,14 @@ def upsert_pdf_to_vectorstore(pdf_path: str, namespace: str) -> int:
         # Try using Pinecone client directly instead of vector store
         index = pc.Index(INDEX_NAME)
         
-        # Prepare vectors for direct upsert
+        # Prepare vectors for direct upsert - batch embed all chunks at once
+        chunk_texts = [chunk.page_content for chunk in chunks]
+        print(f"DEBUG: Generating embeddings for {len(chunk_texts)} chunks in batch")
+        embeddings = embeddings_model.embed_documents(chunk_texts)
+        print(f"DEBUG: Generated {len(embeddings)} embeddings")
+        
         vectors_to_upsert = []
-        for i, chunk in enumerate(chunks):
-            # Generate embedding
-            embedding = embeddings_model.embed_query(chunk.page_content)
-            
+        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
             # Prepare vector data
             vector_data = {
                 "id": f"chunk_{i}_{namespace}",
