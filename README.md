@@ -1,97 +1,120 @@
-# Assignment_by_Predusk
-It is a mini rag built as an assignment.
+# PDF RAG Chat Application
+#Build as an assessment for PreDusk Technologies.
+#resume - https://drive.google.com/file/d/1hyJG00rVroPCRyzoJRL-HW5oir6od3ht/view?usp=sharing
+A Flask-based PDF Retrieval-Augmented Generation (RAG) chat application that allows users to upload PDFs and ask questions about their content. Built as an assignment showcasing modern RAG architecture.
 
-# PDF RAG Chat (Flask)
+## 🚀 Features
 
-Upload a PDF and ask grounded questions about it. The app uses a RAG pipeline: embeddings → vector DB retrieval → rerank → LLM answer with inline citations and real source snippets.
+- **PDF Upload & Processing**: Automatic chunking and embedding generation
+- **Intelligent Retrieval**: Multi-query expansion with semantic search
+- **Advanced Reranking**: Jina AI reranker for improved relevance
+- **Grounded Answers**: LLM responses with inline citations and source snippets
+- **Session Isolation**: Per-session namespaces prevent data contamination
+- **Multiple LLM Support**: OpenRouter, OpenAI, or Google Gemini
 
-## 1) Vector Database (hosted)
-- Provider: Pinecone (cloud-hosted)
-- Index/collection: `PINECONE_INDEX_NAME` (env, default `apirag-1024`)
-- Dimensionality: auto-detected from the embedding model at startup (current model = 1024 dims)
-- Upsert strategy:
-  - PDF is split into chunks; each chunk is embedded and upserted with a unique id `chunk_{i}_{namespace}`
-  - Per-session namespace (e.g., `pdf_xxxxxxxx`) isolates data per upload
-  - Metadata stored per vector: `source` (path), `title` (filename), `section` (page if available), `position` (chunk index)
+## 🏗️ Architecture
 
-## 2) Embeddings & Chunking
-- Embedding model: Jina AI Embeddings v3 (`EMBEDDING_MODEL` env; default `jina-embeddings-v3` → 1024-d)
-  - Uses Jina API for embeddings with configurable dimensions
-- Chunking strategy: token-based splitter `from_tiktoken_encoder`
-  - Size: 1,000 tokens
-  - Overlap: 150 tokens (~15%)
-- Metadata captured on each chunk for citations: `source`, `title`, `section` (page), `position`
+### Vector Database Pipeline
+- **Pinecone**: Cloud-hosted vector database
+- **Index**: `apirag-1024` (1024-dimensional embeddings)
+- **Embeddings**: Jina AI Embeddings v3 via API
+- **Chunking**: 1000 tokens with 150 token overlap
+- **Isolation**: Session-scoped namespaces (`pdf_{session_id}`)
 
-## 3) Retriever + Reranker
-- Retriever: custom Pinecone retriever (top-k=5) + LangChain `MultiQueryRetriever` to expand queries
-- Reranker: `PineconeRerank` with `top_n=5` applied before answering
-  - You can replace with Cohere/Jina/Voyage/BGE rerankers by swapping the reranker component
+### RAG Processing Flow
+1. **Document Processing**: PDF → PyPDFLoader → RecursiveCharacterTextSplitter → Jina Embeddings → Pinecone
+2. **Query Processing**: MultiQueryRetriever → Pinecone similarity search → Jina reranking
+3. **Answer Generation**: Retrieved context → LLM → Grounded response with citations
 
-## 4) LLM & Answering
-- LLM provider: `ChatOpenAI` via `OPENAI_API_BASE` and `OPENAI_API_KEY`
-  - Works with OpenRouter (default) or OpenAI (set `OPENAI_API_BASE=https://api.openai.com/v1`)
-  - Model id: `OPENAI_MODEL`
-- Grounding & citations:
-  - The prompt instructs the model to answer using only retrieved context
-  - Inline citations like `[1]`, `[2]` map to numbered context items
-  - Backend appends real source snippets corresponding only to the citations used in the answer
-- No-answer handling: if context lacks relevant info, model is instructed to respond accordingly
+### Key Components
+- **Embeddings**: Jina AI v3 (API-based, 1024-dimensional)
+- **Reranker**: Jina AI reranker for relevance optimization
+- **LLM**: OpenRouter/OpenAI/Gemini support
+- **Frontend**: Simple upload interface with real-time chat
 
-## 5) Frontend
-- UI: upload area, chat box, answers panel with citations & sources
-- UX:
-  - Uploading popup: “Uploading PDF… this may take up to 2 minutes” (shown during indexing)
-  - Success toast when indexing completes
-- Metrics:
-  - UI shows response time (ms)
-  - Backend returns rough token and cost estimates in the `/chat` response JSON (not shown in UI by default)
+## 🛠️ Setup
 
-## Setup
-1) Create venv and install deps
+### 1. Environment Setup
 ```bash
+# Create virtual environment (Windows)
 py -m venv .venv
-# PowerShell
+
+# Activate virtual environment (PowerShell)
 . .venv\Scripts\Activate.ps1
+
+# Install dependencies
 pip install -r requirements.txt
 ```
-2) Create `.env`
+
+### 2. Environment Configuration
+Create `.env` file from template:
 ```bash
-OPENAI_API_KEY=your_key
-OPENAI_API_BASE=https://openrouter.ai/api/v1  # or https://api.openai.com/v1
+cp env.example .env
+```
+
+Required environment variables:
+```bash
+# LLM Configuration
+OPENAI_API_KEY=your_openrouter_or_openai_key
+OPENAI_API_BASE=https://openrouter.ai/api/v1
 OPENAI_MODEL=openai/gpt-4o-mini
+
+# Vector Database
 PINECONE_API_KEY=your_pinecone_key
 PINECONE_INDEX_NAME=apirag-1024
+
+# Jina AI (Embeddings + Reranking)
 JINA_API_KEY=your_jina_key
 EMBEDDING_MODEL=jina-embeddings-v3
 JINA_EMBEDDING_DIMENSIONS=1024
-FLASK_SECRET_KEY=change-me
+
+# Flask
+FLASK_SECRET_KEY=your-secret-key
 ```
-3) Run
+
+### 3. Run Application
 ```bash
 python app.py
 ```
 Open http://localhost:5000
 
-## Notes
-- OpenRouter Zero Data Retention: use a ZDR-supported model or disable ZDR in settings
-- Index is auto-created with the detected embedding dimension
-- Each page refresh clears prior session’s namespace
+## 📝 Usage
 
-## Troubleshooting
-- 0 documents retrieved: re-upload PDF and ask without refreshing between steps
-- 404 from OpenRouter (ZDR): select a ZDR-capable model or disable ZDR
-- Slow upload: large files and embedding can take up to ~2 minutes
+1. **Upload PDF**: Click "Upload PDF" and select your document
+2. **Wait for Processing**: The app will chunk and embed your PDF (may take 1-2 minutes)
+3. **Ask Questions**: Chat with your PDF using natural language
+4. **Get Answers**: Receive grounded responses with inline citations and source snippets
 
----
+## 🚀 Deployment
 
-## Architecture & Settings (Compact)
-- Vector DB: Pinecone (cloud). Index: `PINECONE_INDEX_NAME` (default `apirag-1024`). Dim: inferred from embeddings (1024). Upsert: per-chunk ids `chunk_{i}_{namespace}`; namespace per session.
-- Embeddings: Jina AI Embeddings v3 (`EMBEDDING_MODEL`, default `jina-embeddings-v3`, 1024-d). Chunking: 1,000 tokens, 150 overlap (~15%). Metadata per chunk: `source`, `title`, `section`, `position`.
-- Retriever: custom Pinecone retriever (top-k 5) + MultiQuery retriever. Reranker: PineconeRerank top_n 5.
-- LLM: OpenRouter-compatible `ChatOpenAI` (answer-only). Grounded answer with inline citations; backend appends only cited snippets. No-answer handled in prompt.
-- Frontend: upload area + chat box + answers panel; shows time; tokens and rough cost appended under the answer.
-- Hosting: Render (Gunicorn). Keep keys server-side. Example env in `env.example`.
+### Render.com (Recommended)
+The app is optimized for Render deployment:
+- Uses Gunicorn with memory-optimized settings
+- API-based embeddings (no local model loading)
+- Configured via `render.yaml`
 
-## Remarks
-- OpenRouter ZDR may block some models; choose a ZDR-supported model or disable ZDR.
-- Render free tier is resource-limited; service runs with 1 worker / 2 threads to reduce memory.
+### Environment Variables for Production
+Set these in your deployment platform:
+```bash
+OPENAI_API_KEY=your_key
+PINECONE_API_KEY=your_key
+JINA_API_KEY=your_key
+PINECONE_INDEX_NAME=apirag-1024
+FLASK_SECRET_KEY=your_production_secret
+```
+
+## 👁️ Key Features
+
+- **Memory Efficient**: API-based embeddings eliminate local model overhead
+- **Session Isolated**: Each upload creates a separate namespace
+- **Citation Tracking**: Answers include source references and snippets
+- **Multi-LLM Support**: Works with OpenRouter, OpenAI, or Gemini
+- **Batch Processing**: Efficient embedding generation for large documents
+
+## 🛠️ Technical Notes
+
+- **Embedding Dimension**: 1024 (Jina v3)
+- **Chunk Size**: 1000 tokens with 150 token overlap
+- **Retrieval**: Top-5 similarity search + Jina reranking (top-3)
+- **Session Management**: Automatic cleanup on page refresh
+- **API Rate Limits**: Batched requests (50 texts per API call)

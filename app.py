@@ -6,7 +6,6 @@ from typing import List
 from flask import Flask, jsonify, render_template, request, session
 
 from langchain_core.embeddings import Embeddings
-# Removed sentence_transformers import - using Jina API instead
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone
@@ -24,9 +23,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 
 
-# ----------------------------
 # Flask setup
-# ----------------------------
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key")
 
@@ -36,9 +33,7 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-# ----------------------------
-# Environment variables loaded from .env (no hardcoded secrets)
-# ----------------------------
+# Environment variables loaded from .env
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_API_BASE = os.getenv('OPENAI_API_BASE', 'https://openrouter.ai/api/v1')
@@ -51,7 +46,7 @@ LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'openrouter').lower()
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
 
-# Export for downstream SDKs that read from env
+
 if OPENAI_API_KEY:
     os.environ['OPENAI_API_KEY'] = OPENAI_API_KEY
 os.environ['OPENAI_API_BASE'] = OPENAI_API_BASE
@@ -63,9 +58,7 @@ if LLM_PROVIDER == 'gemini' and GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
-# ----------------------------
 # Jina Embeddings v3 wrapper using API
-# ----------------------------
 class JinaEmbeddingsWrapper(Embeddings):
     def __init__(self, model_name: str, api_key: str, dimensions: int = 1024):
         self.model_name = model_name
@@ -111,8 +104,7 @@ class JinaEmbeddingsWrapper(Embeddings):
             raise e
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        # Process in batches to avoid API limits
-        batch_size = 50  # Reasonable batch size for Jina API
+        batch_size = 50  
         all_embeddings = []
         
         for i in range(0, len(texts), batch_size):
@@ -130,18 +122,18 @@ class JinaEmbeddingsWrapper(Embeddings):
 embeddings_model = JinaEmbeddingsWrapper(EMBEDDING_MODEL, JINA_API_KEY, JINA_EMBEDDING_DIMENSIONS)
 
 
-# ----------------------------
+
 # Jina Reranker
-# ----------------------------
+
 def jina_rerank(question: str, docs: list, top_n: int = 3):
     """Rerank documents using Jina API"""
     api_key = os.getenv("JINA_API_KEY")
     model = os.getenv("JINA_RERANK_MODEL", "jina-reranker-v1-base-en")
     if not api_key or not docs:
         print(f"DEBUG: Jina rerank skipped - API key: {bool(api_key)}, docs: {len(docs)}")
-        return docs  # fallback: no rerank
+        return docs  
 
-    # Extract plain text from docs or dicts (supports your current formats)
+    
     def get_text(d):
         if hasattr(d, "page_content"):
             return d.page_content
@@ -152,7 +144,7 @@ def jina_rerank(question: str, docs: list, top_n: int = 3):
             return nd.get("page_content", nd.get("text", ""))
         return d.get("page_content", d.get("text", ""))
 
-    # Prepare documents for Jina API
+    
     documents_for_api = [{"text": get_text(d)} for d in docs]
     
     payload = {
@@ -184,7 +176,7 @@ def jina_rerank(question: str, docs: list, top_n: int = 3):
             print("DEBUG: No results from Jina API")
             return docs
             
-        # Map back to original docs by indices
+        
         out = []
         for r in results:
             idx = r.get("index")
