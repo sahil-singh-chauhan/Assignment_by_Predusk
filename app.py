@@ -351,7 +351,7 @@ def build_retriever(namespace: str | None):
         query_embedding = embeddings_model.embed_query("test")
         results = index.query(
             vector=query_embedding,
-            top_k=5,
+            top_k=5,  # increased for better retrieval
             namespace=namespace,
             include_metadata=True
         )
@@ -380,7 +380,7 @@ def build_retriever(namespace: str | None):
             query_embedding = self.embeddings_model.embed_query(query)
             results = self.index.query(
                 vector=query_embedding,
-                top_k=2,  # reduced for memory
+                top_k=5,  # increased for better retrieval
                 namespace=self.namespace,
                 include_metadata=True
             )
@@ -469,7 +469,7 @@ def build_chains(namespace: str | None):
         retrieved_docs = retriever.invoke(question)
         print(f"DEBUG: Retrieved {len(retrieved_docs)} documents")
         # Use Jina reranker
-        reranked_docs = jina_rerank(question, retrieved_docs, top_n=2)
+        reranked_docs = jina_rerank(question, retrieved_docs, top_n=5)
         print(f"DEBUG: Reranked to {len(reranked_docs)} documents")
         
         # Format context with source information for citations
@@ -557,7 +557,7 @@ def generate_answer_simple(namespace: str, question: str, chat_history: list[str
     retrieved_docs = retriever.invoke(question)
     print(f"DEBUG: Retrieved {len(retrieved_docs)} documents")
     # Use Jina reranker
-    reranked_docs = jina_rerank(question, retrieved_docs, top_n=2)
+    reranked_docs = jina_rerank(question, retrieved_docs, top_n=5)
     print(f"DEBUG: Reranked to {len(reranked_docs)} documents")
 
     # Build formatted context and source snippets (replicates previous logic)
@@ -787,6 +787,39 @@ def cleanup_all():
         return jsonify({"success": True, "message": "All namespaces cleaned up"})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/debug_chunks", methods=["GET"])
+def debug_chunks():
+    """Debug: Show sample chunks from current namespace"""
+    namespace = session.get("namespace")
+    if not namespace:
+        return jsonify({"error": "No namespace found"}), 400
+    
+    try:
+        index = pc.Index(INDEX_NAME)
+        # Get some random vectors to see what's stored
+        dummy_vector = [0.0] * JINA_EMBEDDING_DIMENSIONS
+        results = index.query(
+            vector=dummy_vector,
+            top_k=5,
+            namespace=namespace,
+            include_metadata=True
+        )
+        
+        chunks = []
+        for match in results['matches']:
+            metadata = match.get('metadata', {})
+            chunks.append({
+                'text': metadata.get('text', '')[:200] + '...',
+                'source': metadata.get('source', ''),
+                'section': metadata.get('section', ''),
+                'position': metadata.get('position', '')
+            })
+        
+        return jsonify({"namespace": namespace, "chunks": chunks})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
