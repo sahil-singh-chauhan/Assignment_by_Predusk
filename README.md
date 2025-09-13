@@ -55,28 +55,28 @@ cp env.example .env
 Required environment variables:
 ```bash
 # LLM Configuration
-OPENAI_API_KEY=your_openrouter_or_openai_key
-OPENAI_API_BASE=https://openrouter.ai/api/v1
-OPENAI_MODEL=openai/gpt-4o-mini
+OPENAI_API_KEY
+OPENAI_API_BASE
+OPENAI_MODEL 
 
 # Vector Database
-PINECONE_API_KEY=your_pinecone_key
-PINECONE_INDEX_NAME=apirag-1024
+PINECONE_API_KEY
+PINECONE_INDEX_NAME
 
 # Jina AI (Embeddings + Reranking)
-JINA_API_KEY=your_jina_key
-EMBEDDING_MODEL=jina-embeddings-v3
-JINA_EMBEDDING_DIMENSIONS=1024
+JINA_API_KEY
+EMBEDDING_MODEL
+JINA_EMBEDDING_DIMENSIONS
 
 # Flask
-FLASK_SECRET_KEY=your-secret-key
+FLASK_SECRET_KEY
 ```
 
 ### 3. Run Application
 ```bash
 python app.py
 ```
-Open http://localhost:5000
+
 
 ## 📝 Usage
 
@@ -87,20 +87,12 @@ Open http://localhost:5000
 
 ## 🚀 Deployment
 
-### Render.com (Recommended)
+### Render.co
 The app is optimized for Render deployment:
 - Uses Gunicorn with memory-optimized settings
 - API-based embeddings (no local model loading)
 - Configured via `render.yaml`
 
-### Environment Variables for Production
-Set these in your deployment platform:
-```bash
-OPENAI_API_KEY=your_key
-PINECONE_API_KEY=your_key
-JINA_API_KEY=your_key
-PINECONE_INDEX_NAME=apirag-1024
-FLASK_SECRET_KEY=your_production_secret
 ```
 
 ## 👁️ Key Features
